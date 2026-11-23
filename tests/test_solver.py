@@ -103,6 +103,21 @@ def test_opens_largest_box_that_fits_not_largest_overall() -> None:
     assert summary(pack([rod, cube(2, 10)], catalogue)) == [("Tube", [1, 2])]
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Known limitation: free spaces are never merged. The first two slabs leave "
+    "two side-by-side 160- and 140-wide gaps; the 300-wide slab fits neither alone.",
+)
+def test_known_limitation_three_slabs_that_exactly_fill_box_c() -> None:
+    slabs = [
+        Package(id=1, width=160, height=400, length=240, weight=1),
+        Package(id=2, width=140, height=400, length=240, weight=1),
+        Package(id=3, width=300, height=400, length=60, weight=1),
+    ]
+
+    assert len(pack(slabs, CATALOGUE)) == 1
+
+
 def test_packing_is_deterministic() -> None:
     packages = [cube(i, 40 + i * 7, i) for i in range(20)]
 
