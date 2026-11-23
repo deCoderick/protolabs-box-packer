@@ -14,6 +14,8 @@ SPEC_EXAMPLE = [
     {"id": 125, "width": 5, "height": 5, "length": 10, "weight": 10},
 ]
 
+PACKING_PATHS = ("/packing", "/packing/debug")
+
 
 @pytest.fixture(scope="module")
 def client() -> TestClient:
@@ -24,8 +26,8 @@ def package(**overrides: Any) -> dict[str, Any]:
     return {"id": 1, "width": 10, "height": 10, "length": 10, "weight": 1} | overrides
 
 
-def post_raw(client: TestClient, body: str) -> Response:
-    return client.post("/packing", content=body, headers={"content-type": "application/json"})
+def post_raw(client: TestClient, path: str, body: str) -> Response:
+    return client.post(path, content=body, headers={"content-type": "application/json"})
 
 
 def assert_error(response: Response, status: int, code: str) -> list[dict[str, Any]]:
@@ -46,44 +48,93 @@ def test_spec_example_payload(client: TestClient) -> None:
     response = client.post("/packing", json=SPEC_EXAMPLE)
 
     assert response.status_code == 200
-    assert response.json() == {
-        "box_count": 1,
-        "boxes": [{"box_type": "B", "package_ids": [123, 125]}],
-    }
+    assert response.json() == {"box_count": 1}
+    assert "boxes" not in response.json()
 
 
 def test_empty_list_needs_no_boxes(client: TestClient) -> None:
     response = client.post("/packing", json=[])
 
     assert response.status_code == 200
-    assert response.json() == {"box_count": 0, "boxes": []}
+    assert response.json() == {"box_count": 0}
+    assert "boxes" not in response.json()
 
 
 def test_accepts_decimal_dimensions(client: TestClient) -> None:
     response = client.post("/packing", json=[package(width=10.5, weight=0.25)])
 
     assert response.status_code == 200
-    assert response.json()["box_count"] == 1
+    assert response.json() == {"box_count": 1}
 
 
-def test_lists_one_entry_per_box(client: TestClient) -> None:
+def test_counts_one_box_per_heavy_item(client: TestClient) -> None:
     heavy = [package(id=i, weight=2000) for i in (1, 2)]
 
     response = client.post("/packing", json=heavy)
 
-    assert response.json() == {
-        "box_count": 2,
-        "boxes": [
-            {"box_type": "C", "package_ids": [1]},
-            {"box_type": "C", "package_ids": [2]},
-        ],
-    }
+    assert response.json() == {"box_count": 2}
 
 
-def test_duplicate_ids_are_rejected(client: TestClient) -> None:
+def test_debug_returns_box_breakdown_and_placements(client: TestClient) -> None:
+    response = client.post("/packing/debug", json=SPEC_EXAMPLE)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["box_count"] == 1
+    assert len(body["boxes"]) == 1
+
+    box = body["boxes"][0]
+    assert box["box_type"] == "B"
+    assert box["package_ids"] == [123, 125]
+    assert {p["package_id"] for p in box["placements"]} == {123, 125}
+
+    for placement in box["placements"]:
+        assert set(placement) == {"package_id", "x", "y", "z", "dx", "dy", "dz"}
+        assert placement["x"] >= 0
+        assert placement["y"] >= 0
+        assert placement["z"] >= 0
+        assert placement["dx"] > 0
+        assert placement["dy"] > 0
+        assert placement["dz"] > 0
+        assert placement["x"] + placement["dx"] <= 100
+        assert placement["y"] + placement["dy"] <= 200
+        assert placement["z"] + placement["dz"] <= 100
+
+
+def test_debug_empty_list(client: TestClient) -> None:
+    response = client.post("/packing/debug", json=[])
+
+    assert response.status_code == 200
+    assert response.json() == {"box_count": 0, "boxes": []}
+
+
+def test_debug_lists_one_entry_per_box(client: TestClient) -> None:
+    heavy = [package(id=i, weight=2000) for i in (1, 2)]
+
+    response = client.post("/packing/debug", json=heavy)
+
+    assert response.json()["box_count"] == 2
+    boxes = response.json()["boxes"]
+    assert [box["box_type"] for box in boxes] == ["C", "C"]
+    assert [box["package_ids"] for box in boxes] == [[1], [2]]
+    assert all(len(box["placements"]) == 1 for box in boxes)
+
+
+def test_debug_matches_packing_box_count(client: TestClient) -> None:
+    payload = [package(id=i, width=40 + i, height=40, length=40, weight=i + 1) for i in range(8)]
+
+    packing = client.post("/packing", json=payload).json()
+    debug = client.post("/packing/debug", json=payload).json()
+
+    assert packing == {"box_count": debug["box_count"]}
+    assert len(debug["boxes"]) == debug["box_count"]
+
+
+@pytest.mark.parametrize("path", PACKING_PATHS)
+def test_duplicate_ids_are_rejected(client: TestClient, path: str) -> None:
     payload = [package(id=7), package(id=8), package(id=7)]
 
-    details = assert_error(client.post("/packing", json=payload), 422, "duplicate_package_ids")
+    details = assert_error(client.post(path, json=payload), 422, "duplicate_package_ids")
 
     assert [(d["loc"], d["package_id"], d["type"]) for d in details] == [
         ([0, "id"], 7, "duplicate_id"),
@@ -91,7 +142,8 @@ def test_duplicate_ids_are_rejected(client: TestClient) -> None:
     ]
 
 
-def test_unpackable_packages_are_all_reported(client: TestClient) -> None:
+@pytest.mark.parametrize("path", PACKING_PATHS)
+def test_unpackable_packages_are_all_reported(client: TestClient, path: str) -> None:
     payload = [
         package(id=1),
         package(id=99, width=500),
@@ -99,7 +151,7 @@ def test_unpackable_packages_are_all_reported(client: TestClient) -> None:
         package(id=101, width=500, weight=5000),
     ]
 
-    details = assert_error(client.post("/packing", json=payload), 422, "unpackable_packages")
+    details = assert_error(client.post(path, json=payload), 422, "unpackable_packages")
 
     assert [(d["loc"], d["package_id"], d["type"]) for d in details] == [
         ([1], 99, "too_large"),
@@ -109,6 +161,7 @@ def test_unpackable_packages_are_all_reported(client: TestClient) -> None:
     assert details[0]["message"] == "Package 99 is larger than every box, in any orientation."
 
 
+@pytest.mark.parametrize("path", PACKING_PATHS)
 @pytest.mark.parametrize(
     ("payload", "loc", "error_type"),
     [
@@ -145,36 +198,39 @@ def test_unpackable_packages_are_all_reported(client: TestClient) -> None:
     ],
 )
 def test_invalid_payloads(
-    client: TestClient, payload: Any, loc: list[str | int], error_type: str
+    client: TestClient, path: str, payload: Any, loc: list[str | int], error_type: str
 ) -> None:
-    details = assert_error(client.post("/packing", json=payload), 422, "validation_error")
+    details = assert_error(client.post(path, json=payload), 422, "validation_error")
 
     assert [(d["loc"], d["type"]) for d in details] == [(loc, error_type)]
 
 
+@pytest.mark.parametrize("path", PACKING_PATHS)
 @pytest.mark.parametrize("field", ["id", "width", "height", "length", "weight"])
-def test_missing_field(client: TestClient, field: str) -> None:
+def test_missing_field(client: TestClient, path: str, field: str) -> None:
     item = package()
     del item[field]
 
-    details = assert_error(client.post("/packing", json=[item]), 422, "validation_error")
+    details = assert_error(client.post(path, json=[item]), 422, "validation_error")
 
     assert [(d["loc"], d["type"]) for d in details] == [([0, field], "missing")]
 
 
+@pytest.mark.parametrize("path", PACKING_PATHS)
 @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
-def test_non_finite_numbers_are_rejected(client: TestClient, literal: str) -> None:
+def test_non_finite_numbers_are_rejected(client: TestClient, path: str, literal: str) -> None:
     body = json.dumps([package()]).replace('"width": 10', f'"width": {literal}')
 
-    details = assert_error(post_raw(client, body), 422, "validation_error")
+    details = assert_error(post_raw(client, path, body), 422, "validation_error")
 
     assert [(d["loc"], d["type"]) for d in details] == [([0, "width"], "finite_number")]
 
 
-def test_reports_every_invalid_field(client: TestClient) -> None:
+@pytest.mark.parametrize("path", PACKING_PATHS)
+def test_reports_every_invalid_field(client: TestClient, path: str) -> None:
     payload = [package(width=0, weight=-1), package(id=2, height="x")]
 
-    details = assert_error(client.post("/packing", json=payload), 422, "validation_error")
+    details = assert_error(client.post(path, json=payload), 422, "validation_error")
 
     assert sorted(tuple(map(str, d["loc"])) for d in details) == [
         ("0", "weight"),
@@ -183,22 +239,25 @@ def test_reports_every_invalid_field(client: TestClient) -> None:
     ]
 
 
-def test_malformed_json(client: TestClient) -> None:
-    details = assert_error(post_raw(client, '[{"id": 1,'), 400, "invalid_json")
+@pytest.mark.parametrize("path", PACKING_PATHS)
+def test_malformed_json(client: TestClient, path: str) -> None:
+    details = assert_error(post_raw(client, path, '[{"id": 1,'), 400, "invalid_json")
 
     assert details[0]["type"] == "json_invalid"
 
 
-def test_missing_body(client: TestClient) -> None:
-    details = assert_error(post_raw(client, ""), 422, "validation_error")
+@pytest.mark.parametrize("path", PACKING_PATHS)
+def test_missing_body(client: TestClient, path: str) -> None:
+    details = assert_error(post_raw(client, path, ""), 422, "validation_error")
 
     assert details[0]["type"] == "missing"
 
 
-def test_request_size_is_capped(client: TestClient) -> None:
+@pytest.mark.parametrize("path", PACKING_PATHS)
+def test_request_size_is_capped(client: TestClient, path: str) -> None:
     payload = [package(id=i) for i in range(MAX_PACKAGES_PER_REQUEST + 1)]
 
-    details = assert_error(client.post("/packing", json=payload), 422, "validation_error")
+    details = assert_error(client.post(path, json=payload), 422, "validation_error")
 
     assert details[0]["type"] == "too_long"
 
@@ -207,8 +266,9 @@ def test_unknown_route_uses_error_envelope(client: TestClient) -> None:
     assert_error(client.get("/nope"), 404, "not_found")
 
 
-def test_wrong_method_uses_error_envelope(client: TestClient) -> None:
-    response = client.get("/packing")
+@pytest.mark.parametrize("path", PACKING_PATHS)
+def test_wrong_method_uses_error_envelope(client: TestClient, path: str) -> None:
+    response = client.get(path)
 
     assert_error(response, 405, "method_not_allowed")
     assert response.headers["allow"] == "POST"
@@ -231,15 +291,45 @@ def test_custom_catalogue_can_be_injected() -> None:
     client = TestClient(create_app(catalogue=(tube,)))
 
     ok = client.post("/packing", json=[package(width=4, height=4, length=450)])
+    debug = client.post("/packing/debug", json=[package(width=4, height=4, length=450)])
     too_wide = client.post("/packing", json=[package(id=2)])
 
-    assert ok.json() == {"box_count": 1, "boxes": [{"box_type": "Tube", "package_ids": [1]}]}
+    assert ok.json() == {"box_count": 1}
+    assert debug.json() == {
+        "box_count": 1,
+        "boxes": [
+            {
+                "box_type": "Tube",
+                "package_ids": [1],
+                "placements": [
+                    {
+                        "package_id": 1,
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 0.0,
+                        "dx": 4.0,
+                        "dy": 4.0,
+                        "dz": 450.0,
+                    },
+                ],
+            }
+        ],
+    }
     assert assert_error(too_wide, 422, "unpackable_packages")[0]["package_id"] == 2
 
 
-def test_openapi_documents_error_envelope(client: TestClient) -> None:
-    responses = client.get("/openapi.json").json()["paths"]["/packing"]["post"]["responses"]
+@pytest.mark.parametrize("path", PACKING_PATHS)
+def test_openapi_documents_error_envelope(client: TestClient, path: str) -> None:
+    responses = client.get("/openapi.json").json()["paths"][path]["post"]["responses"]
 
     for status in ("400", "422"):
         schema_ref = responses[status]["content"]["application/json"]["schema"]["$ref"]
         assert schema_ref.endswith("/ErrorResponse")
+
+
+def test_openapi_response_models(client: TestClient) -> None:
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+
+    assert set(schemas["PackingResponse"]["properties"]) == {"box_count"}
+    assert "boxes" in schemas["DebugPackingResponse"]["properties"]
+    assert "placements" in schemas["PackedBoxOut"]["properties"]

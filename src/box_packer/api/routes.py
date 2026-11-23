@@ -6,8 +6,15 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, Request
 
 from box_packer.api.errors import ApiError
-from box_packer.api.schemas import ErrorDetail, ErrorResponse, PackageIn, PackingResponse
+from box_packer.api.schemas import (
+    DebugPackingResponse,
+    ErrorDetail,
+    ErrorResponse,
+    PackageIn,
+    PackingResponse,
+)
 from box_packer.catalogue import Catalogue
+from box_packer.models import PackedBox
 from box_packer.solver import UnpackablePackagesError, UnpackableReason, pack
 
 # Packing time grows roughly quadratically; this keeps a single request bounded.
@@ -16,6 +23,11 @@ MAX_PACKAGES_PER_REQUEST = 1000
 SPEC_EXAMPLE = [
     {"id": 123, "width": 10, "height": 10, "length": 10, "weight": 5},
     {"id": 125, "width": 5, "height": 5, "length": 10, "weight": 10},
+]
+
+PackagesBody = Annotated[
+    list[PackageIn],
+    Body(max_length=MAX_PACKAGES_PER_REQUEST, examples=[SPEC_EXAMPLE]),
 ]
 
 _UNPACKABLE_MESSAGES = {
@@ -53,16 +65,30 @@ def health() -> dict[str, str]:
 @router.post(
     "/packing",
     tags=["packing"],
-    summary="Compute the shipping boxes needed for a list of packages",
+    summary="Compute how many shipping boxes are needed for a list of packages",
     responses=_ERROR_RESPONSES,
 )
 def create_packing(
-    packages: Annotated[
-        list[PackageIn],
-        Body(max_length=MAX_PACKAGES_PER_REQUEST, examples=[SPEC_EXAMPLE]),
-    ],
+    packages: PackagesBody,
     catalogue: Annotated[Catalogue, Depends(get_catalogue)],
 ) -> PackingResponse:
+    return PackingResponse.from_domain(_pack_or_raise(packages, catalogue))
+
+
+@router.post(
+    "/packing/debug",
+    tags=["packing"],
+    summary="Pack packages and return the box breakdown with placements",
+    responses=_ERROR_RESPONSES,
+)
+def create_packing_debug(
+    packages: PackagesBody,
+    catalogue: Annotated[Catalogue, Depends(get_catalogue)],
+) -> DebugPackingResponse:
+    return DebugPackingResponse.from_domain(_pack_or_raise(packages, catalogue))
+
+
+def _pack_or_raise(packages: Sequence[PackageIn], catalogue: Catalogue) -> tuple[PackedBox, ...]:
     if duplicates := _duplicate_id_details(packages):
         raise ApiError(
             HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -71,10 +97,9 @@ def create_packing(
             duplicates,
         )
     try:
-        boxes = pack([p.to_domain() for p in packages], catalogue)
+        return pack([p.to_domain() for p in packages], catalogue)
     except UnpackablePackagesError as exc:
         raise _unpackable_error(exc, packages) from exc
-    return PackingResponse.from_domain(boxes)
 
 
 def _duplicate_id_details(packages: Sequence[PackageIn]) -> list[ErrorDetail]:

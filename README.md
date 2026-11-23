@@ -1,6 +1,6 @@
 ## Box Packer
 
-A small FastAPI service: send it a list of packages, get back how many shipping boxes they need and which packages go in each box.
+A small FastAPI service: send it a list of packages, get back how many shipping boxes they need. A separate debug endpoint returns the full box breakdown with 3D placements.
 
 ### Quick start
 
@@ -13,7 +13,7 @@ Requires [uv](https://docs.astral.sh/uv/) (it fetches the pinned Python 3.13 its
 | `make test` | Run the test suite (`uv run pytest`) |
 | `make check` | `ruff` lint + format check, `mypy --strict`, then `pytest` |
 
-`make check` / `make test` report **100 passed, 1 xfailed**. The expected failure is intentional: it pins a known limitation of the heuristic (see [Known limitations](#known-limitations-and-what-id-do-with-more-time)). It is not a broken test.
+`make check` / `make test` report **135 passed, 1 xfailed**. The expected failure is intentional: it pins a known limitation of the heuristic (see [Known limitations](#known-limitations-and-what-id-do-with-more-time)). It is not a broken test.
 
 Interactive docs are at `http://127.0.0.1:8000/docs`. Try the spec's example payload:
 
@@ -25,12 +25,27 @@ curl -s -X POST http://127.0.0.1:8000/packing \
 ```
 
 ```json
-{"box_count":1,"boxes":[{"box_type":"B","package_ids":[123,125]}]}
+{"box_count":1}
+```
+
+For the box-by-box breakdown (types, package ids, 3D placements):
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/packing/debug \
+  -H 'Content-Type: application/json' \
+  -d '[{ "id": 123, "width": 10, "height": 10, "length": 10, "weight": 5 },
+       { "id": 125, "width": 5, "height": 5, "length": 10, "weight": 10 }]'
+```
+
+```json
+{"box_count":1,"boxes":[{"box_type":"B","package_ids":[123,125],
+  "placements":[{"package_id":123,"x":0.0,"y":0.0,"z":0.0,"dx":10.0,"dy":10.0,"dz":10.0},
+                {"package_id":125,"x":0.0,"y":0.0,"z":10.0,"dx":5.0,"dy":5.0,"dz":10.0}]}]}
 ```
 
 ### API contract
 
-**`POST /packing`**: the request body is a bare JSON array of packages, exactly as in the spec.
+Both packing endpoints take the same request body: a bare JSON array of packages, exactly as in the spec.
 
 | Field | Type | Rule |
 |---|---|---|
@@ -38,11 +53,13 @@ curl -s -X POST http://127.0.0.1:8000/packing \
 | `width`, `height`, `length` | number | Required, `> 0`, finite. Decimals allowed (`10.5`). |
 | `weight` | number | Required, `> 0`, finite. |
 
-Unknown fields are rejected. At most **1,000 packages** per request.
+Unknown fields are rejected. At most **1,000 packages** per request. Validation, catalogue injection, and the error envelope are identical on both endpoints.
 
-**`200 OK`**: `box_count` plus one entry per box, naming the box type and the packages inside it. An empty list returns `{"box_count": 0, "boxes": []}`.
-
-**`GET /health`**: `{"status": "ok"}`.
+| Endpoint | `200 OK` body |
+|---|---|
+| **`POST /packing`** | `{"box_count": <int>}` only. Empty input → `{"box_count": 0}`. |
+| **`POST /packing/debug`** | `box_count` plus `boxes[]`, each with `box_type`, `package_ids`, and `placements[]` (`package_id`, `x`, `y`, `z`, `dx`, `dy`, `dz`). Empty input → `{"box_count": 0, "boxes": []}`. |
+| **`GET /health`** | `{"status": "ok"}`. |
 
 #### Errors
 
@@ -127,7 +144,7 @@ All size and weight comparisons use a **`1e-9` absolute tolerance**, so exact fi
 - **O(N²)-ish runtime.** Each placement scans the free spaces of every open box. Indexing free spaces by size would help much larger orders.
 - **Box count is the only cost.** Real shipping would optimise price, including dimensional weight, and possibly let the client choose.
 - **Per-package constraints:** `upright` (fixed height axis) and `fragile` (nothing stacked on top) flags would fit in via the `orientations()` step and placement checks.
-- **Return placement coordinates.** The solver already tracks each package's position and orientation; exposing them (behind a query flag) would give warehouse staff packing instructions.
+- **Warehouse-facing packing instructions.** `POST /packing/debug` already returns coordinates; next step would be a human-readable packing sequence (order of placement, orientation labels) rather than raw extents.
 - **Operational polish:** request IDs and structured logging, and a published benchmark of heuristic quality against lower bounds.
 
 ### Project layout
