@@ -1,0 +1,6 @@
+services:
+  box-packer:
+    build: .
+    image: box-packer:latest
+    ports:
+      - "8000:8000"
