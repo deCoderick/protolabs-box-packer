@@ -1,0 +1,7 @@
+{
+  "boxes": [
+    { "name": "A", "width": 150, "height": 150, "length": 150, "maxWeight": 1000 },
+    { "name": "B", "width": 100, "height": 200, "length": 100, "maxWeight": 1000 },
+    { "name": "C", "width": 300, "height": 400, "length": 300, "maxWeight": 3000 }
+  ]
+}
