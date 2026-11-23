@@ -13,6 +13,8 @@ Requires [uv](https://docs.astral.sh/uv/) (it fetches the pinned Python 3.13 its
 | `make test` | Run the test suite (`uv run pytest`) |
 | `make check` | `ruff` lint + format check, `mypy --strict`, then `pytest` |
 
+`make check` / `make test` report **100 passed, 1 xfailed**. The expected failure is intentional: it pins a known limitation of the heuristic (see [Known limitations](#known-limitations-and-what-id-do-with-more-time)). It is not a broken test.
+
 Interactive docs are at `http://127.0.0.1:8000/docs`. Try the spec's example payload:
 
 ```bash
