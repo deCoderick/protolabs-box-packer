@@ -8,20 +8,19 @@ Requires [uv](https://docs.astral.sh/uv/) (it fetches the pinned Python 3.13 its
 
 | Command | What it does |
 |---|---|
-| `make run` | Install deps and serve on `http://127.0.0.1:8000` with auto-reload (`uv run uvicorn box_packer.main:app --reload`) |
+| `make run` | Serve on `http://127.0.0.1:8000` with auto-reload for Python and `*.json` |
 | `make docker` | Build and run the container on `http://127.0.0.1:8000` (`docker compose up --build`) |
 | `make test` | Run the test suite (`uv run pytest`) |
 | `make check` | `ruff` lint + format check, `mypy --strict`, then `pytest` |
 
-`make check` / `make test` report **135 passed, 1 xfailed**. The expected failure is intentional: it pins a known limitation of the heuristic (see [Known limitations](#known-limitations-and-what-id-do-with-more-time)). It is not a broken test.
+`make check` / `make test` report **1 expected failure (1 xfailed)** alongside the passing suite. That failure is intentional: it pins a known limitation of the heuristic (see [Known limitations](#known-limitations-and-what-id-do-with-more-time)). It is not a broken test.
 
 Interactive docs are at `http://127.0.0.1:8000/docs`. Try the spec's example payload:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/packing \
   -H 'Content-Type: application/json' \
-  -d '[{ "id": 123, "width": 10, "height": 10, "length": 10, "weight": 5 },
-       { "id": 125, "width": 5, "height": 5, "length": 10, "weight": 10 }]'
+  -d '[{"id":123,"width":10,"height":10,"length":10,"weight":5},{"id":125,"width":5,"height":5,"length":10,"weight":10}]'
 ```
 
 ```json
@@ -33,14 +32,23 @@ For the box-by-box breakdown (types, package ids, 3D placements):
 ```bash
 curl -s -X POST http://127.0.0.1:8000/packing/debug \
   -H 'Content-Type: application/json' \
-  -d '[{ "id": 123, "width": 10, "height": 10, "length": 10, "weight": 5 },
-       { "id": 125, "width": 5, "height": 5, "length": 10, "weight": 10 }]'
+  -d '[{"id":123,"width":10,"height":10,"length":10,"weight":5},{"id":125,"width":5,"height":5,"length":10,"weight":10}]'
 ```
 
 ```json
-{"box_count":1,"boxes":[{"box_type":"B","package_ids":[123,125],
-  "placements":[{"package_id":123,"x":0.0,"y":0.0,"z":0.0,"dx":10.0,"dy":10.0,"dz":10.0},
-                {"package_id":125,"x":0.0,"y":0.0,"z":10.0,"dx":5.0,"dy":5.0,"dz":10.0}]}]}
+{
+  "box_count": 1,
+  "boxes": [
+    {
+      "box_type": "B",
+      "package_ids": [123, 125],
+      "placements": [
+        {"package_id": 123, "x": 0.0, "y": 0.0, "z": 0.0, "dx": 10.0, "dy": 10.0, "dz": 10.0},
+        {"package_id": 125, "x": 0.0, "y": 0.0, "z": 10.0, "dx": 5.0, "dy": 5.0, "dz": 10.0}
+      ]
+    }
+  ]
+}
 ```
 
 ### API contract
@@ -91,13 +99,21 @@ Every error, including 404/405/500, uses the same envelope:
 
 ### Editing the box catalogue
 
-Boxes live in [`src/box_packer/boxes.json`](src/box_packer/boxes.json):
+Boxes live in [`src/box_packer/boxes.json`](src/box_packer/boxes.json) as a JSON object whose `boxes` field is an array:
 
 ```json
-{ "name": "A", "width": 150, "height": 150, "length": 150, "maxWeight": 1000 }
+{
+  "boxes": [
+    { "name": "A", "width": 150, "height": 150, "length": 150, "maxWeight": 1000 },
+    { "name": "B", "width": 100, "height": 200, "length": 100, "maxWeight": 1000 },
+    { "name": "C", "width": 300, "height": 400, "length": 300, "maxWeight": 3000 }
+  ]
+}
 ```
 
 The file is validated once, when the app starts (`create_app()`), so a bad edit stops the service immediately rather than failing on a later request. It must contain at least one box, names must be unique, every number must be finite and `> 0`, and unknown keys (typos like `"widht"`) are rejected. Tests and callers can pass a different catalogue with `create_app(catalogue=...)`.
+
+`make run` reloads on changes to Python *and* `*.json` (`--reload-include '*.json'`). Without that flag, uvicorn's default watcher only tracks Python files, so a plain `uvicorn --reload` would need a restart after editing `boxes.json`.
 
 ### Packing approach
 
@@ -115,7 +131,7 @@ The engine is pure Python with no FastAPI imports: `geometry.py` holds the 3D he
 
 All size and weight comparisons use a **`1e-9` absolute tolerance**, so exact fits survive float rounding (three 0.1-wide items fit in a 0.3-wide box).
 
-**Why not compare volumes?** Volume alone gives false positives. Three 160-cubes take up only 34% of box C, but only two physically fit (160 + 160 + 160 > 400). A packing the warehouse cannot actually close is a correctness bug. An extra box is only an inefficiency.
+**Why not compare volumes?** Volume alone gives false positives. Three 160-cubes take up only 34% of box C (300 × 400 × 300), but only two physically fit: 160 + 160 > 300 on each of the two shorter axes, and 3 × 160 > 400 on the longest. A packing the warehouse cannot actually close is a correctness bug. An extra box is only an inefficiency.
 
 **Box C dominance.** C (300 × 400 × 300, 3000) is at least as large as A and B on every axis, even after rotation, and on weight. With this catalogue, C can hold anything A or B can, so step 4 always opens a C and step 5 shrinks it to A or B when the contents allow. The solver still compares boxes per package rather than hard-coding C, so a non-dominated box added to `boxes.json` (e.g. a 50 × 50 × 500 tube) is used correctly; there is a test for exactly that.
 
@@ -135,7 +151,7 @@ All size and weight comparisons use a **`1e-9` absolute tolerance**, so exact fi
 - **A box's weight limit covers its contents only.** The box's own weight is ignored.
 - **Fewest boxes is the only objective.** Among equally good results, the smaller box (by volume) is preferred, not the cheapest.
 - **Box tie-breaks:** volume, then weight limit, then name. All ordering is deterministic.
-- **The route is a sync `def`.** Packing is CPU-bound, so FastAPI runs it in its threadpool instead of blocking the event loop the way an `async def` would.
+- **The packing routes are sync `def`s.** Packing is CPU-bound, so FastAPI runs them in its threadpool instead of blocking the event loop the way an `async def` would.
 - **Requests are capped at 1,000 packages**, because runtime grows roughly quadratically (about 0.6 s for 1,000 mixed packages on a laptop).
 
 ### Known limitations and what I'd do with more time

@@ -8,7 +8,7 @@ install: ## Install dependencies into .venv
 	uv sync
 
 run: ## Run the API locally with auto-reload on http://127.0.0.1:8000
-	uv run uvicorn box_packer.main:app --reload
+	uv run uvicorn box_packer.main:app --reload --reload-include '*.json'
 
 test: ## Run the test suite
 	uv run pytest
